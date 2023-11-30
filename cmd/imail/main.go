@@ -1,44 +1,55 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"net/mail"
 	"os"
-	"time"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
-	"github.com/emersion/go-sasl"
+	"github.com/gookit/goutil/dump"
 )
 
-type XOAUTH2Client struct {
-	Username string
-	Token    string
-}
+func main2() {
+	mc, err := client.DialTLS("imap.gmail.com:993", nil)
 
-func (c *XOAUTH2Client) Start() (mech string, ir []byte, err error) {
-	mech = "XOAUTH2"
-	var str = "user=" + c.Username + "\x01"
-
-	str += "auth=Bearer " + c.Token + "\x01\x01"
-	fmt.Printf("str=%v\n", str)
-	ir = []byte(str)
-	return
-}
-
-func (c *XOAUTH2Client) Next(challenge []byte) ([]byte, error) {
-	fmt.Printf("challenge=%v\n", string(challenge))
-	authBearerErr := &sasl.OAuthBearerError{}
-	if err := json.Unmarshal(challenge, authBearerErr); err != nil {
-		return nil, err
-	} else {
-		return nil, authBearerErr
+	if err != nil {
+		panic(err)
 	}
+
+	err = mc.Login("fmanuelganga@gmail.com", os.Getenv("PASS"))
+
+	if err != nil {
+		panic(err)
+	}
+
+	defer mc.Logout()
+
+	if _, err := mc.Select("INBOX", false); err != nil {
+		log.Fatal(err)
+	}
+
+	seqset := new(imap.SeqSet)
+	uid := uint32(826)
+	log.Printf("trying to fetch uid %d", uid)
+	seqset.AddNum(uid)
+
+	messages := make(chan *imap.Message, 1)
+	done := make(chan error, 1)
+
+	go func() {
+		done <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
+	}()
+
+	msg := <-messages
+	s := msg.Envelope.Subject
+
+	fmt.Printf("subject=%v\n", s)
+
+	if err := <-done; err != nil {
+		log.Fatal(err)
+	}
+
 }
 
 func main() {
@@ -49,131 +60,73 @@ func main() {
 		panic(err)
 	}
 
-	auth()
-
-	messageChannel := make(chan string, 0)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go authServer(ctx, messageChannel)
-
-	code := <-messageChannel
-
-	fmt.Printf("code=%v\n", code)
-
-	// shutdown the http server
-	cancel()
-
-	// TODO: provide the account from a config file
-	xoauthClient := &XOAUTH2Client{
-		Username: "fmanuelganga@gmail.com",
-		Token:    code,
-	}
-
-	err = mc.Authenticate(xoauthClient)
-
-	if err != nil {
-		fmt.Printf("err=%+v\n", err)
-		os.Exit(1)
-	}
-
-	_, err = mc.Select("INBOX", true)
+	err = mc.Login("fmanuelganga@gmail.com", os.Getenv("PASS"))
 
 	if err != nil {
 		panic(err)
 	}
 
-	criteria := imap.SearchCriteria{
-		WithFlags: []string{"\\Seen"},
-		Since:     time.Now().Add(-time.Hour * 24),
+	defer mc.Logout()
+
+	if _, err := mc.Select("INBOX", false); err != nil {
+		log.Fatal(err)
 	}
 
-	res, err := mc.Search(&criteria)
+	// Create a channel to receive mailbox updates
+	updates := make(chan client.Update)
+	mc.Updates = updates
 
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("res=%v\n", res)
-
-	messages := make(chan *imap.Message, 1)
+	stop := make(chan struct{})
 	done := make(chan error, 1)
-
-	set := &imap.SeqSet{}
-	set.AddNum(res[0])
-
-	fmt.Println("fetching...")
-
-	// TODO: research how to only fetch the message subjects
-	section := &imap.BodySectionName{}
-	items := []imap.FetchItem{section.FetchItem()}
-
 	go func() {
-		done <- mc.Fetch(set, items, messages)
+		done <- mc.Idle(stop, nil)
 	}()
 
-	log.Println("Last message:")
-	msg := <-messages
-	r := msg.GetBody(section)
-	if r == nil {
-		log.Fatal("Server didn't returned message body")
-	}
+	fmt.Println("Start idling....")
+	// Listen for updates
 
-	if err := <-done; err != nil {
-		log.Fatal(err)
-	}
+	for {
+		select {
+		case update := <-updates:
+			log.Println("New update:", update)
+			dump.P(update)
 
-	m, err := mail.ReadMessage(r)
-	if err != nil {
-		log.Fatal(err)
-	}
+			switch u := update.(type) {
+			case *client.MailboxUpdate:
+				log.Println("is Mailbox update")
 
-	header := m.Header
-	log.Println("Date:", header.Get("Date"))
-	log.Println("From:", header.Get("From"))
-	log.Println("To:", header.Get("To"))
-	log.Println("Subject:", header.Get("Subject"))
+				seqset := new(imap.SeqSet)
+				uid := u.Mailbox.UidNext
+				log.Printf("trying to fetch uid %d", uid)
+				seqset.AddNum(uid)
 
-	body, err := io.ReadAll(m.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println(string(body))
-}
+				messages := make(chan *imap.Message, 1)
+				done := make(chan error, 1)
 
-func authServer(ctx context.Context, messageChannel chan<- string) {
+				go func() {
+					done <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
+				}()
 
-	http.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
-		//read code
-		code := r.URL.Query().Get("code")
+				msg := <-messages
 
-		// send the code
-		messageChannel <- code
-		w.WriteHeader(http.StatusOK)
-	})
+				subject := msg.Envelope.Subject
+				log.Printf("Subject: %s", subject)
 
-	server := &http.Server{
-		Addr: ":4000",
-	}
+				if err := <-done; err != nil {
+					log.Fatal(err)
+				}
 
-	go func() {
-		fmt.Println("HTTP server is listening on :8080...")
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Println("Error starting HTTP server:", err)
-			messageChannel <- "Error starting HTTP server"
+			default:
+				log.Println("Unknown update")
+			}
+		case err := <-done:
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println("Not idling anymore")
+			return
 		}
-	}()
-
-	<-ctx.Done()
-
-	// Shut down the server gracefully
-	fmt.Println("Shutting down the server gracefully...")
-	ctxShutDown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := server.Shutdown(ctxShutDown); err != nil {
-		fmt.Println("Error shutting down HTTP server:", err)
-	} else {
-		fmt.Println("Server shut down gracefully.")
 	}
+
 }
 
