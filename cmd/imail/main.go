@@ -77,54 +77,65 @@ func main() {
 	mc.Updates = updates
 
 	stop := make(chan struct{})
-	done := make(chan error, 1)
+	doneIdle := make(chan error, 1)
 	go func() {
-		done <- mc.Idle(stop, nil)
+		doneIdle <- mc.Idle(stop, nil)
 	}()
 
 	fmt.Println("Start idling....")
 	// Listen for updates
 
-	for {
-		select {
-		case update := <-updates:
-			log.Println("New update:", update)
-			dump.P(update)
+	uids := make(chan uint32, 1)
 
-			switch u := update.(type) {
-			case *client.MailboxUpdate:
-				log.Println("is Mailbox update")
+	for up := range updates {
+		dump.P(up)
+		switch update := up.(type) {
+		case *client.MailboxUpdate:
+			uids <- update.Mailbox.UidNext
+			// we close the channel after the first update
+			// TODO: rembember to make a new one for the next idle
+			close(updates)
+			fmt.Println("closing updates")
+		}
+	}
 
-				seqset := new(imap.SeqSet)
-				uid := u.Mailbox.UidNext
-				log.Printf("trying to fetch uid %d", uid)
-				seqset.AddNum(uid)
+	// WARNING:
+	// rembember to close the channel if we want to send commands to the server
+	close(stop)
 
-				messages := make(chan *imap.Message, 1)
-				done := make(chan error, 1)
+	// WARNING: Wait for idle
+	// If we dont wait for it to stop we have a data race
+	// TODO: main loop should be:
+	// for {
+	// idle()
+	// range updates for one update
+	// wait for idle to stop
+	// start IDLE again
+	// }
+	if err := <-doneIdle; err != nil {
+		log.Printf("error idling: %v", err)
+	}
 
-				go func() {
-					done <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
-				}()
+	fmt.Println("Done idling....")
 
-				msg := <-messages
+	for uid := range uids {
+		messages := make(chan *imap.Message, 1)
+		doneFetch := make(chan error, 1)
 
-				subject := msg.Envelope.Subject
-				log.Printf("Subject: %s", subject)
+		seqset := new(imap.SeqSet)
+		seqset.AddNum(uid)
 
-				if err := <-done; err != nil {
-					log.Fatal(err)
-				}
+		go func() {
+			doneFetch <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
+		}()
 
-			default:
-				log.Println("Unknown update")
-			}
-		case err := <-done:
-			if err != nil {
-				log.Fatal(err)
-			}
-			log.Println("Not idling anymore")
-			return
+		msg := <-messages
+		s := msg.Envelope.Subject
+
+		fmt.Printf("subject=%v\n", s)
+
+		if err := <-doneFetch; err != nil {
+			log.Fatal(err)
 		}
 	}
 
