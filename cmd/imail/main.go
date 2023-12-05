@@ -10,48 +10,6 @@ import (
 	"github.com/gookit/goutil/dump"
 )
 
-func main2() {
-	mc, err := client.DialTLS("imap.gmail.com:993", nil)
-
-	if err != nil {
-		panic(err)
-	}
-
-	err = mc.Login("fmanuelganga@gmail.com", os.Getenv("PASS"))
-
-	if err != nil {
-		panic(err)
-	}
-
-	defer mc.Logout()
-
-	if _, err := mc.Select("INBOX", false); err != nil {
-		log.Fatal(err)
-	}
-
-	seqset := new(imap.SeqSet)
-	uid := uint32(826)
-	log.Printf("trying to fetch uid %d", uid)
-	seqset.AddNum(uid)
-
-	messages := make(chan *imap.Message, 1)
-	done := make(chan error, 1)
-
-	go func() {
-		done <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
-	}()
-
-	msg := <-messages
-	s := msg.Envelope.Subject
-
-	fmt.Printf("subject=%v\n", s)
-
-	if err := <-done; err != nil {
-		log.Fatal(err)
-	}
-
-}
-
 func main() {
 	// TODO: this probably could be configurable for now only support gmail
 	mc, err := client.DialTLS("imap.gmail.com:993", nil)
