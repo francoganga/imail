@@ -5,9 +5,9 @@ import (
 	"log"
 	"os"
 
-	"github.com/emersion/go-imap"
+	"os/exec"
+
 	"github.com/emersion/go-imap/client"
-	"github.com/gookit/goutil/dump"
 )
 
 func main() {
@@ -43,59 +43,18 @@ func main() {
 	fmt.Println("Start idling....")
 	// Listen for updates
 
-	uids := make(chan uint32, 1)
-
 	for up := range updates {
-		dump.P(up)
-		switch update := up.(type) {
+		switch up.(type) {
 		case *client.MailboxUpdate:
-			uids <- update.Mailbox.UidNext
-			// we close the channel after the first update
-			// TODO: rembember to make a new one for the next idle
-			close(updates)
-			fmt.Println("closing updates")
+			go func() {
+				cmd := exec.Command("notify-send", "Mail", "You have new mail", "--icon=mail-unread")
+				err := cmd.Run()
+
+				if err != nil {
+					log.Fatal(err)
+				}
+			}()
 		}
 	}
-
-	// WARNING:
-	// rembember to close the channel if we want to send commands to the server
-	close(stop)
-
-	// WARNING: Wait for idle
-	// If we dont wait for it to stop we have a data race
-	// TODO: main loop should be:
-	// for {
-	// idle()
-	// range updates for one update
-	// wait for idle to stop
-	// start IDLE again
-	// }
-	if err := <-doneIdle; err != nil {
-		log.Printf("error idling: %v", err)
-	}
-
-	fmt.Println("Done idling....")
-
-	for uid := range uids {
-		messages := make(chan *imap.Message, 1)
-		doneFetch := make(chan error, 1)
-
-		seqset := new(imap.SeqSet)
-		seqset.AddNum(uid)
-
-		go func() {
-			doneFetch <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
-		}()
-
-		msg := <-messages
-		s := msg.Envelope.Subject
-
-		fmt.Printf("subject=%v\n", s)
-
-		if err := <-doneFetch; err != nil {
-			log.Fatal(err)
-		}
-	}
-
 }
 
