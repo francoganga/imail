@@ -37,8 +37,9 @@ func main() {
 
 func setup() {
 
-	fmt.Println("Enter mail: ")
 	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Println("Enter mail: ")
+	scanner.Scan()
 
 	mail := scanner.Text()
 
@@ -71,10 +72,11 @@ func run() {
 		panic(err)
 	}
 
+	// TODO: dont have this hardcoded
 	err = mc.Login("fmanuelganga@gmail.com", secret)
 
 	if err != nil {
-		panic(err)
+		log.Fatalf("Login Error: %s", err.Error())
 	}
 
 	defer mc.Logout()
