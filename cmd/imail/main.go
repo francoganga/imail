@@ -3,22 +3,23 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
+	"os/exec"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
-	"github.com/gookit/goutil/dump"
 )
+
+var lastUid uint32
 
 func main() {
 	// TODO: this probably could be configurable for now only support gmail
-	mc, err := client.DialTLS("imap.gmail.com:993", nil)
+	mc, err := client.Dial("localhost:143")
 
 	if err != nil {
 		panic(err)
 	}
 
-	err = mc.Login("fmanuelganga@gmail.com", os.Getenv("PASS"))
+	err = mc.Login("ubuntu", "asdfqwer")
 
 	if err != nil {
 		panic(err)
@@ -27,75 +28,82 @@ func main() {
 	defer mc.Logout()
 
 	if _, err := mc.Select("INBOX", false); err != nil {
-		log.Fatal(err)
+		log.Fatal(fmt.Errorf("select INBOX error: %v", err))
 	}
 
 	// Create a channel to receive mailbox updates
-	updates := make(chan client.Update)
+	updates := make(chan client.Update, 0)
 	mc.Updates = updates
 
-	stop := make(chan struct{})
-	doneIdle := make(chan error, 1)
-	go func() {
-		doneIdle <- mc.Idle(stop, nil)
-	}()
-
-	fmt.Println("Start idling....")
-	// Listen for updates
-
-	uids := make(chan uint32, 1)
-
-	for up := range updates {
-		dump.P(up)
-		switch update := up.(type) {
-		case *client.MailboxUpdate:
-			uids <- update.Mailbox.UidNext
-			// we close the channel after the first update
-			// TODO: rembember to make a new one for the next idle
-			close(updates)
-			fmt.Println("closing updates")
-		}
-	}
-
-	// WARNING:
-	// rembember to close the channel if we want to send commands to the server
-	close(stop)
-
-	// WARNING: Wait for idle
-	// If we dont wait for it to stop we have a data race
-	// TODO: main loop should be:
-	// for {
-	// idle()
-	// range updates for one update
-	// wait for idle to stop
-	// start IDLE again
-	// }
-	if err := <-doneIdle; err != nil {
-		log.Printf("error idling: %v", err)
-	}
-
-	fmt.Println("Done idling....")
-
-	for uid := range uids {
-		messages := make(chan *imap.Message, 1)
-		doneFetch := make(chan error, 1)
-
-		seqset := new(imap.SeqSet)
-		seqset.AddNum(uid)
-
+	for {
+		stop := make(chan struct{})
+		doneIdle := make(chan error, 1)
 		go func() {
-			doneFetch <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
+			doneIdle <- mc.Idle(stop, nil)
 		}()
 
-		msg := <-messages
-		s := msg.Envelope.Subject
+		fmt.Println("Start idling....")
+		// Listen for updates
 
-		fmt.Printf("subject=%v\n", s)
+		exit := false
 
-		if err := <-doneFetch; err != nil {
+		last_updates := make(chan client.MailboxUpdate, 1)
+
+		for up := range updates {
+			if exit {
+				break
+			}
+			switch update := up.(type) {
+			case *client.MailboxUpdate:
+				last_updates <- *update
+
+				exit = true
+			}
+		}
+
+		close(stop)
+
+		if err := <-doneIdle; err != nil {
+			log.Fatal(fmt.Errorf("idle error: %v", err))
+		}
+
+		fmt.Println("Done idling....")
+
+		update := <-last_updates
+		fetchMessageSubject(mc, update)
+	}
+
+}
+
+func fetchMessageSubject(mc *client.Client, update client.MailboxUpdate) {
+	messages := make(chan *imap.Message, 1)
+	doneFetch := make(chan error, 1)
+
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(update.Mailbox.Messages)
+
+	go func() {
+		doneFetch <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
+	}()
+
+	msg := <-messages
+	if msg != nil && msg.Envelope != nil {
+		fmt.Printf("msg.Envelope=%v\n", msg.Envelope)
+
+		header := fmt.Sprintf("Unread Mail (%d)", update.Mailbox.Recent)
+
+		body := fmt.Sprintf("[%s]\\n%s", msg.Envelope.From[0].Address(), msg.Envelope.Subject)
+
+		cmd := exec.Command("notify-send", header, body, "--icon=mail-unread")
+		err := cmd.Run()
+
+		if err != nil {
 			log.Fatal(err)
 		}
 	}
 
+	if err := <-doneFetch; err != nil {
+		log.Fatal(err)
+	}
 }
 
