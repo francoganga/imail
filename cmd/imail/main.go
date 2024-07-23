@@ -9,6 +9,7 @@ import (
 
 	"os/exec"
 
+	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/client"
 	"github.com/zalando/go-keyring"
 	"golang.org/x/term"
@@ -89,27 +90,73 @@ func run() {
 	updates := make(chan client.Update)
 	mc.Updates = updates
 
-	stop := make(chan struct{})
-	doneIdle := make(chan error, 1)
+	for {
+		stop := make(chan struct{})
+		doneIdle := make(chan error, 1)
+		go func() {
+			doneIdle <- mc.Idle(stop, nil)
+		}()
+
+		fmt.Println("Start idling....")
+		// Listen for updates
+
+		exit := false
+		last_updates := make(chan client.MailboxUpdate)
+
+		for up := range updates {
+			if exit {
+				break
+			}
+			switch update := up.(type) {
+			case *client.MailboxUpdate:
+				last_updates <- *update
+				exit = true
+			}
+		}
+
+		close(stop)
+
+		if err := <-doneIdle; err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Println("Done idling....")
+
+		update := <-last_updates
+
+		fetchMessageAndNotify(mc, update)
+	}
+}
+
+func fetchMessageAndNotify(mc *client.Client, update client.MailboxUpdate) {
+	messages := make(chan *imap.Message, 1)
+	doneFetch := make(chan error, 1)
+
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(update.Mailbox.Messages)
+
 	go func() {
-		doneIdle <- mc.Idle(stop, nil)
+		doneFetch <- mc.UidFetch(seqset, []imap.FetchItem{imap.FetchEnvelope}, messages)
 	}()
 
-	fmt.Println("Start idling....")
-	// Listen for updates
+	msg := <-messages
+	if msg != nil && msg.Envelope != nil {
+		fmt.Printf("msg.Envelope=%v\n", msg.Envelope)
 
-	for up := range updates {
-		switch up.(type) {
-		case *client.MailboxUpdate:
-			go func() {
-				cmd := exec.Command("notify-send", "Mail", "You have new mail", "--icon=mail-unread")
-				err := cmd.Run()
+		header := fmt.Sprintf("Unread Mail (%d)", update.Mailbox.Recent)
 
-				if err != nil {
-					log.Fatal(err)
-				}
-			}()
+		body := fmt.Sprintf("[%s]\\n%s", msg.Envelope.From[0].Address(), msg.Envelope.Subject)
+
+		cmd := exec.Command("notify-send", header, body, "--icon=mail-unread")
+		err := cmd.Run()
+
+		if err != nil {
+			log.Fatal(err)
 		}
+	}
+
+	if err := <-doneFetch; err != nil {
+		log.Fatal(err)
 	}
 }
 
